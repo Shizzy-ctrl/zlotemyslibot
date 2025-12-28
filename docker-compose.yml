@@ -1,0 +1,9 @@
+services:
+  app:
+    build: .
+    container_name: zlotemyslibot
+    restart: unless-stopped
+    volumes:
+      - ./config.json:/app/config.json
+    env_file:
+      - .env

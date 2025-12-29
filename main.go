@@ -139,7 +139,7 @@ func scheduleDailyQuote(s *discordgo.Session) {
 
 	for t := range ticker.C {
 		now := t.In(loc)
-		if now.Hour() == 10 && now.Minute() == 35 {
+		if now.Hour() == 10 && now.Minute() == 47 {
 			if config.ChannelID != "" {
 				sendRandomQuote(s, config.ChannelID)
 			}

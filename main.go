@@ -138,7 +138,7 @@ func sendRandomQuote(s *discordgo.Session, channelID string) {
 func startCronScheduler(s *discordgo.Session) {
 	loc, err := time.LoadLocation("Europe/Warsaw")
 	if err != nil {
-		log.Fatal("Location error:", err) // Teraz pokaże konkretny błąd
+		log.Fatal("Location error:", err)
 	}
 
 	c := cron.New(cron.WithLocation(loc))
@@ -146,7 +146,8 @@ func startCronScheduler(s *discordgo.Session) {
 	_, err = c.AddFunc("0 9 * * ?", func() {
 		fmt.Println("🕐 CRON 9:00 CET!")
 		if config.ChannelID != "" {
-			sendRandomQuote(s, config.ChannelID)
+			// ZMIENIONO: "Złota myśl dnia" zamiast zwykłej złotej myśli
+			sendDailyQuote(s, config.ChannelID)
 		}
 	})
 	if err != nil {
@@ -155,6 +156,16 @@ func startCronScheduler(s *discordgo.Session) {
 
 	fmt.Println("✅ Cron działa - 9:00 CET codziennie!")
 	c.Start()
+}
+
+// NOWA FUNKCJA dla zaplanowanej złotej myśli dnia
+func sendDailyQuote(s *discordgo.Session, channelID string) {
+	if len(config.Quotes) == 0 {
+		s.ChannelMessageSend(channelID, "Brak złotych myśli! Dodaj je komendą !dodaj")
+		return
+	}
+	quote := config.Quotes[rand.Intn(len(config.Quotes))]
+	s.ChannelMessageSend(channelID, fmt.Sprintf("🌅 **Złota myśl dnia** 🌅\n\n*%s*", quote))
 }
 
 func sendPaginatedList(s *discordgo.Session, channelID string) {

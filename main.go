@@ -75,7 +75,7 @@ func loadConfig() {
 
 func saveConfig() {
 	data, _ := json.MarshalIndent(config, "", "  ")
-	os.WriteFile(configFile, data, 0644)
+	os.WriteFile(configFile, data, 0o644)
 }
 
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -133,21 +133,20 @@ func sendRandomQuote(s *discordgo.Session, channelID string) {
 }
 
 func scheduleDailyQuote(s *discordgo.Session) {
-	for {
-		now := time.Now()
-		next := time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, now.Location())
-		if now.After(next) {
-			next = next.Add(24 * time.Hour)
-		}
-		duration := next.Sub(now)
+	loc, _ := time.LoadLocation("Europe/Warsaw")
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
 
-		time.Sleep(duration)
-
-		if config.ChannelID != "" {
-			sendRandomQuote(s, config.ChannelID)
+	for t := range ticker.C {
+		now := t.In(loc)
+		if now.Hour() == 10 && now.Minute() == 30 {
+			if config.ChannelID != "" {
+				sendRandomQuote(s, config.ChannelID)
+			}
 		}
 	}
 }
+
 func sendPaginatedList(s *discordgo.Session, channelID string) {
 	if len(config.Quotes) == 0 {
 		s.ChannelMessageSend(channelID, "Brak złotych myśli!")

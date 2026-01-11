@@ -38,7 +38,7 @@ func main() {
 		log.Fatal("Brak tokena Discord! Ustaw zmienną DISCORD_TOKEN")
 	}
 
-	rand.Seed(time.Now().UnixNano()) // ✅ Losowe cytaty
+	rand.Seed(time.Now().UnixNano())
 
 	loadConfig()
 
@@ -50,7 +50,6 @@ func main() {
 	dg.AddHandler(messageCreate)
 	dg.Identify.Intents = discordgo.IntentsGuildMessages
 
-	// 🚀 CRON SCHEDULER zamiast tickera
 	go startCronScheduler(dg)
 
 	err = dg.Open()
@@ -130,6 +129,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 !usun <numer> - Usuń złotą myśl (podaj numer z listy)
 !lista - Pokaż wszystkie złote myśli
 !kanal <ID> - Ustaw kanał dla codziennych myśli o 9:00
+!gem [URL] - Pobierz wykres ze Stooq
 !pomoc - Pokaż tę pomoc`
 		s.ChannelMessageSend(m.ChannelID, help)
 	}
@@ -140,6 +140,8 @@ func handleGemCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if urlStr == "" {
 		urlStr = "https://stooq.pl/q/?s=eimi.uk&d=20260105&c=1y&t=l&a=lg&r=cndx.uk+cbu0.uk+ib01.uk"
 	}
+
+	s.ChannelMessageSend(m.ChannelID, "⏳ Pobieram wykres...")
 
 	pngBytes, err := scrapeStooqChartPNG(urlStr)
 	if err != nil {
@@ -158,29 +160,112 @@ func handleGemCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func scrapeStooqChartPNG(pageURL string) ([]byte, error) {
-	baseURL, err := url.Parse(pageURL)
+	// Parsuj główny URL
+	parsedURL, err := url.Parse(pageURL)
 	if err != nil {
 		return nil, fmt.Errorf("nieprawidłowy URL: %w", err)
 	}
 
-	if strings.Contains(baseURL.Path, "/q/c/") || strings.HasSuffix(baseURL.Path, "/c/") {
-		return fetchStooqPNG(baseURL, baseURL)
+	// Wyciągnij parametry z URL
+	query := parsedURL.Query()
+	symbol := query.Get("s")
+	if symbol == "" {
+		return nil, errors.New("brak symbolu (parametr 's') w URL")
 	}
 
-	client := &http.Client{Timeout: 20 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, baseURL.String(), nil)
+	// Buduj bezpośredni URL do wykresu PNG
+	chartURL := buildChartURL(query)
+
+	log.Printf("Próba pobrania wykresu z: %s", chartURL)
+
+	// Pobierz PNG z kilkoma próbami
+	for attempt := 1; attempt <= 3; attempt++ {
+		pngBytes, err := fetchStooqPNG(pageURL, chartURL)
+		if err == nil && isPNG(pngBytes) {
+			return pngBytes, nil
+		}
+		log.Printf("Próba %d/3 nieudana: %v", attempt, err)
+		time.Sleep(time.Duration(attempt) * time.Second)
+	}
+
+	// Jeśli bezpośrednie pobieranie nie działa, spróbuj ze scrapowania HTML
+	log.Println("Bezpośrednie pobieranie nie powiodło się. Próba scrapowania HTML...")
+	return scrapeFromHTML(pageURL)
+}
+
+func buildChartURL(query url.Values) string {
+	// Podstawowe parametry dla wykresu PNG
+	params := url.Values{}
+
+	// Symbol
+	if s := query.Get("s"); s != "" {
+		params.Set("s", s)
+	}
+
+	// Data
+	if d := query.Get("d"); d != "" {
+		params.Set("d", d)
+	} else {
+		params.Set("d", time.Now().Format("20060102"))
+	}
+
+	// Okres wykresu
+	if c := query.Get("c"); c != "" {
+		params.Set("c", c)
+	} else {
+		params.Set("c", "1y")
+	}
+
+	// Typ wykresu
+	if t := query.Get("t"); t != "" {
+		params.Set("t", t)
+	} else {
+		params.Set("t", "l")
+	}
+
+	// Analiza
+	if a := query.Get("a"); a != "" {
+		params.Set("a", a)
+	}
+
+	// Porównania
+	if r := query.Get("r"); r != "" {
+		params.Set("r", r)
+	}
+
+	// Dodatkowe parametry dla lepszej jakości
+	params.Set("g", "1") // Siatka
+
+	return "https://stooq.pl/q/c/?" + params.Encode()
+}
+
+func scrapeFromHTML(pageURL string) ([]byte, error) {
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return nil
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0")
+
+	// Symuluj przeglądarkę
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "pl,en-US;q=0.7,en;q=0.3")
 	req.Header.Set("Cookie", "privacy=1")
+	req.Header.Set("Referer", "https://stooq.pl/")
 
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+
+	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
@@ -189,117 +274,103 @@ func scrapeStooqChartPNG(pageURL string) ([]byte, error) {
 		return nil, err
 	}
 
-	img := doc.Find("div#aqi_mc img").First()
-	var src string
-	if img.Length() != 0 {
-		if v, ok := img.Attr("src"); ok {
-			src = strings.TrimSpace(v)
-		}
-		if src == "" {
-			if v, ok := img.Attr("src2"); ok {
-				src = strings.TrimSpace(v)
-			}
-		}
-	}
+	// Szukaj obrazka wykresu
+	var imgSrc string
 
-	if src == "" {
-		var best string
-		var bestScore int
-		doc.Find("img").Each(func(_ int, sel *goquery.Selection) {
-			candidates := []string{"src", "src2"}
-			for _, attr := range candidates {
-				v, ok := sel.Attr(attr)
-				if !ok {
-					continue
-				}
-				v = strings.TrimSpace(v)
-				if v == "" {
-					continue
-				}
-				compact := strings.Join(strings.Fields(v), "")
-				if !strings.Contains(compact, "c/?") && !strings.Contains(compact, "/q/c/?") {
-					continue
-				}
-				score := 1
-				if w, ok := sel.Attr("width"); ok && strings.TrimSpace(w) == "560" {
-					score += 2
-				}
-				if h, ok := sel.Attr("height"); ok && strings.TrimSpace(h) == "350" {
-					score += 2
-				}
-				if score > bestScore {
-					bestScore = score
-					best = v
-				}
+	// Metoda 1: Główny wykres
+	doc.Find("div#aqi_mc img, div#chart img, img[id*='chart']").Each(func(_ int, s *goquery.Selection) {
+		if src, exists := s.Attr("src"); exists && src != "" {
+			imgSrc = src
+			return
+		}
+		if src, exists := s.Attr("src2"); exists && src != "" {
+			imgSrc = src
+		}
+	})
+
+	// Metoda 2: Szukaj wszystkich obrazków z data:image/png
+	if imgSrc == "" {
+		doc.Find("img").Each(func(_ int, s *goquery.Selection) {
+			if src, exists := s.Attr("src"); exists && strings.HasPrefix(src, "data:image/png;base64,") {
+				imgSrc = src
+				return
 			}
 		})
-		src = best
 	}
 
-	if strings.TrimSpace(src) == "" {
-		chartURL := *baseURL
-		chartURL.Path = "/q/c/"
-		chartURL.RawQuery = baseURL.RawQuery
-		return fetchStooqPNG(baseURL, &chartURL)
+	if imgSrc == "" {
+		return nil, errors.New("nie znaleziono obrazka wykresu na stronie")
 	}
 
-	const prefix = "data:image/png;base64,"
-	if strings.HasPrefix(src, prefix) {
-		raw := strings.TrimPrefix(src, prefix)
-		b, err := base64.StdEncoding.DecodeString(raw)
-		if err != nil {
-			b, err = base64.RawStdEncoding.DecodeString(raw)
-		}
+	// Jeśli to base64, dekoduj
+	if strings.HasPrefix(imgSrc, "data:image/png;base64,") {
+		b64Data := strings.TrimPrefix(imgSrc, "data:image/png;base64,")
+		pngBytes, err := base64.StdEncoding.DecodeString(b64Data)
 		if err != nil {
 			return nil, fmt.Errorf("błąd dekodowania base64: %w", err)
 		}
-		if !isPNG(b) {
-			return nil, errors.New("zdekodowane dane nie są poprawnym PNG")
+		if !isPNG(pngBytes) {
+			return nil, errors.New("zdekodowane dane nie są PNG")
 		}
-		return b, nil
+		return pngBytes, nil
 	}
 
-	src = strings.Join(strings.Fields(src), "")
-
-	imgURL, err := baseURL.Parse(src)
+	// Jeśli to URL względny lub bezwzględny
+	baseURL, _ := url.Parse(pageURL)
+	imgURL, err := baseURL.Parse(imgSrc)
 	if err != nil {
 		return nil, fmt.Errorf("nieprawidłowy URL obrazka: %w", err)
 	}
 
-	return fetchStooqPNG(baseURL, imgURL)
+	return fetchStooqPNG(pageURL, imgURL.String())
 }
 
-func fetchStooqPNG(refererURL *url.URL, imgURL *url.URL) ([]byte, error) {
-	client := &http.Client{Timeout: 20 * time.Second}
-	imgReq, err := http.NewRequest(http.MethodGet, imgURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	imgReq.Header.Set("User-Agent", "Mozilla/5.0")
-	imgReq.Header.Set("Referer", refererURL.String())
-	imgReq.Header.Set("Cookie", "privacy=1")
-
-	imgResp, err := client.Do(imgReq)
-	if err != nil {
-		return nil, err
-	}
-	defer imgResp.Body.Close()
-	if imgResp.StatusCode < 200 || imgResp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d (obrazek)", imgResp.StatusCode)
+func fetchStooqPNG(refererURL, imgURL string) ([]byte, error) {
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return nil
+		},
 	}
 
-	data, err := io.ReadAll(imgResp.Body)
+	req, err := http.NewRequest(http.MethodGet, imgURL, nil)
 	if err != nil {
 		return nil, err
 	}
+
+	// Ważne nagłówki dla Stooq
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "pl,en-US;q=0.7,en;q=0.3")
+	req.Header.Set("Referer", refererURL)
+	req.Header.Set("Cookie", "privacy=1")
+	req.Header.Set("Cache-Control", "no-cache")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		bodyPreview, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
+		return nil, fmt.Errorf("HTTP %d, odpowiedź: %s", resp.StatusCode, string(bodyPreview))
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
 	if !isPNG(data) {
-		ct := strings.TrimSpace(imgResp.Header.Get("Content-Type"))
-		preview := strings.TrimSpace(string(data))
+		ct := resp.Header.Get("Content-Type")
+		preview := string(data)
 		if len(preview) > 200 {
 			preview = preview[:200]
 		}
-		return nil, fmt.Errorf("odpowiedź nie jest PNG (Content-Type: %s, %d bajtów, początek: %q)", ct, len(data), preview)
+		return nil, fmt.Errorf("odpowiedź nie jest PNG (Content-Type: %s, %d bajtów)", ct, len(data))
 	}
+
 	return data, nil
 }
 
@@ -307,7 +378,8 @@ func isPNG(b []byte) bool {
 	if len(b) < 8 {
 		return false
 	}
-	return b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4e && b[3] == 0x47 && b[4] == 0x0d && b[5] == 0x0a && b[6] == 0x1a && b[7] == 0x0a
+	return b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4e && b[3] == 0x47 &&
+		b[4] == 0x0d && b[5] == 0x0a && b[6] == 0x1a && b[7] == 0x0a
 }
 
 func sendRandomQuote(s *discordgo.Session, channelID string) {
@@ -330,7 +402,6 @@ func startCronScheduler(s *discordgo.Session) {
 	_, err = c.AddFunc("0 9 * * ?", func() {
 		fmt.Println("🕐 CRON 9:00 CET!")
 		if config.ChannelID != "" {
-			// ZMIENIONO: "Złota myśl dnia" zamiast zwykłej złotej myśli
 			sendDailyQuote(s, config.ChannelID)
 		}
 	})
@@ -342,7 +413,6 @@ func startCronScheduler(s *discordgo.Session) {
 	c.Start()
 }
 
-// NOWA FUNKCJA dla zaplanowanej złotej myśli dnia
 func sendDailyQuote(s *discordgo.Session, channelID string) {
 	if len(config.Quotes) == 0 {
 		s.ChannelMessageSend(channelID, "Brak złotych myśli! Dodaj je komendą !dodaj")
@@ -388,7 +458,6 @@ func sendPaginatedList(s *discordgo.Session, channelID string) {
 			pageChars += len(line)
 		}
 
-		// POPRAWIONE: _ dla message, err dla błędu
 		if _, err := s.ChannelMessageSend(channelID, msg.String()); err != nil {
 			log.Println("Błąd wysyłania listy:", err)
 			return

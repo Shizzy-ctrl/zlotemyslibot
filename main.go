@@ -169,6 +169,7 @@ func scrapeStooqChartPNG(pageURL string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Cookie", "privacy=1")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -186,7 +187,10 @@ func scrapeStooqChartPNG(pageURL string) ([]byte, error) {
 
 	img := doc.Find("div#aqi_mc img").First()
 	if img.Length() == 0 {
-		return nil, errors.New("nie znaleziono obrazka (div#aqi_mc img)")
+		img = doc.Find("img[src^='c/?']").First()
+	}
+	if img.Length() == 0 {
+		return nil, errors.New("nie znaleziono obrazka (div#aqi_mc img ani img[src^='c/?'])")
 	}
 
 	src, ok := img.Attr("src")
@@ -214,6 +218,8 @@ func scrapeStooqChartPNG(pageURL string) ([]byte, error) {
 		return nil, err
 	}
 	imgReq.Header.Set("User-Agent", "Mozilla/5.0")
+	imgReq.Header.Set("Referer", baseURL.String())
+	imgReq.Header.Set("Cookie", "privacy=1")
 
 	imgResp, err := client.Do(imgReq)
 	if err != nil {

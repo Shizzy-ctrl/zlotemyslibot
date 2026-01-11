@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -30,7 +32,15 @@ var (
 func scrapeGemImage() (string, error) {
 	url := "https://stooq.pl/q/?s=eimi.uk&d=20260105&c=1y&t=l&a=lg&r=cndx.uk+cbu0.uk+ib01.uk"
 
-	resp, err := http.Get(url)
+	// Dodajemy User-Agent aby uniknąć blokady
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("błąd tworzenia requestu: %v", err)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("błąd pobierania strony: %v", err)
 	}
@@ -40,7 +50,44 @@ func scrapeGemImage() (string, error) {
 		return "", fmt.Errorf("błąd HTTP: %d", resp.StatusCode)
 	}
 
-	doc, err := html.Parse(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("błąd odczytu body: %v", err)
+	}
+
+	// Najpierw spróbuj znaleźć div z id="aqi_mc" w surowym HTML
+	bodyStr := string(body)
+
+	// Szukamy wzorca: <div id="aqi_mc"><img src="..." src2="..."
+	divPattern := `<div[^>]*id=["']aqi_mc["'][^>]*>.*?<img[^>]*src=["']([^"']+)["'][^>]*src2=["']([^"']+)["']`
+	re := regexp.MustCompile(divPattern)
+	matches := re.FindStringSubmatch(bodyStr)
+
+	if len(matches) >= 3 {
+		// matches[1] = src, matches[2] = src2
+		src2 := matches[2]
+		// Jeśli src2 jest relatywny, budujemy pełny URL
+		if strings.HasPrefix(src2, "c/") {
+			return "https://stooq.pl/" + src2, nil
+		}
+		return src2, nil
+	}
+
+	// Alternatywnie szukamy samego src2 w kontekście aqi_mc
+	src2Pattern := `id=["']aqi_mc["'][^>]*>.*?src2=["']([^"']+)["']`
+	re2 := regexp.MustCompile(src2Pattern)
+	matches2 := re2.FindStringSubmatch(bodyStr)
+
+	if len(matches2) >= 2 {
+		src2 := matches2[1]
+		if strings.HasPrefix(src2, "c/") {
+			return "https://stooq.pl/" + src2, nil
+		}
+		return src2, nil
+	}
+
+	// Jeśli regex nie zadziałał, próbujemy parsować HTML
+	doc, err := html.Parse(strings.NewReader(bodyStr))
 	if err != nil {
 		return "", fmt.Errorf("błąd parsowania HTML: %v", err)
 	}
@@ -67,18 +114,30 @@ func scrapeGemImage() (string, error) {
 		return "", fmt.Errorf("nie znaleziono div'a o id='aqi_mc'")
 	}
 
+	// Szukamy obrazka z src2
 	var findImage func(*html.Node) string
 	findImage = func(n *html.Node) string {
 		if n.Type == html.ElementNode && n.Data == "img" {
+			var src, src2 string
 			for _, attr := range n.Attr {
-				if attr.Key == "src" {
-					return attr.Val
+				if attr.Key == "src2" {
+					src2 = attr.Val
+				} else if attr.Key == "src" {
+					src = attr.Val
 				}
 			}
+			// Preferujemy src2, jeśli nie ma to src
+			if src2 != "" {
+				if strings.HasPrefix(src2, "c/") {
+					return "https://stooq.pl/" + src2
+				}
+				return src2
+			}
+			return src
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			if src := findImage(c); src != "" {
-				return src
+			if imgSrc := findImage(c); imgSrc != "" {
+				return imgSrc
 			}
 		}
 		return ""

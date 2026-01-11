@@ -186,16 +186,54 @@ func scrapeStooqChartPNG(pageURL string) ([]byte, error) {
 	}
 
 	img := doc.Find("div#aqi_mc img").First()
-	if img.Length() == 0 {
-		img = doc.Find("img[src^='c/?']").First()
-	}
-	if img.Length() == 0 {
-		return nil, errors.New("nie znaleziono obrazka (div#aqi_mc img ani img[src^='c/?'])")
+	var src string
+	if img.Length() != 0 {
+		if v, ok := img.Attr("src"); ok {
+			src = strings.TrimSpace(v)
+		}
+		if src == "" {
+			if v, ok := img.Attr("src2"); ok {
+				src = strings.TrimSpace(v)
+			}
+		}
 	}
 
-	src, ok := img.Attr("src")
-	if !ok || strings.TrimSpace(src) == "" {
-		return nil, errors.New("obrazek nie ma atrybutu src")
+	if src == "" {
+		var best string
+		var bestScore int
+		doc.Find("img").Each(func(_ int, sel *goquery.Selection) {
+			candidates := []string{"src", "src2"}
+			for _, attr := range candidates {
+				v, ok := sel.Attr(attr)
+				if !ok {
+					continue
+				}
+				v = strings.TrimSpace(v)
+				if v == "" {
+					continue
+				}
+				compact := strings.Join(strings.Fields(v), "")
+				if !strings.Contains(compact, "c/?") && !strings.Contains(compact, "/q/c/?") {
+					continue
+				}
+				score := 1
+				if w, ok := sel.Attr("width"); ok && strings.TrimSpace(w) == "560" {
+					score += 2
+				}
+				if h, ok := sel.Attr("height"); ok && strings.TrimSpace(h) == "350" {
+					score += 2
+				}
+				if score > bestScore {
+					bestScore = score
+					best = v
+				}
+			}
+		})
+		src = best
+	}
+
+	if strings.TrimSpace(src) == "" {
+		return nil, errors.New("nie znaleziono obrazka (aqi_mc ani img z src/src2 wskazującym na c/?)")
 	}
 
 	const prefix = "data:image/png;base64,"
@@ -207,6 +245,8 @@ func scrapeStooqChartPNG(pageURL string) ([]byte, error) {
 		}
 		return b, nil
 	}
+
+	src = strings.Join(strings.Fields(src), "")
 
 	imgURL, err := baseURL.Parse(src)
 	if err != nil {

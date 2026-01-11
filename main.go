@@ -1,22 +1,25 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/PuerkitoBio/goquery"
 	"github.com/bwmarrin/discordgo"
 	"github.com/robfig/cron/v3"
-	"golang.org/x/net/html"
 )
 
 type Config struct {
@@ -28,128 +31,6 @@ var (
 	config     Config
 	configFile = "config.json"
 )
-
-func scrapeGemImage() (string, error) {
-	url := "https://stooq.pl/q/?s=eimi.uk&d=20260105&c=1y&t=l&a=lg&r=cndx.uk+cbu0.uk+ib01.uk"
-
-	// Dodajemy User-Agent aby uniknąć blokady
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", fmt.Errorf("błąd tworzenia requestu: %v", err)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("błąd pobierania strony: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("błąd HTTP: %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("błąd odczytu body: %v", err)
-	}
-
-	// Najpierw spróbuj znaleźć div z id="aqi_mc" w surowym HTML
-	bodyStr := string(body)
-
-	// Szukamy wzorca: <div id="aqi_mc"><img src="..." src2="..."
-	divPattern := `<div[^>]*id=["']aqi_mc["'][^>]*>.*?<img[^>]*src=["']([^"']+)["'][^>]*src2=["']([^"']+)["']`
-	re := regexp.MustCompile(divPattern)
-	matches := re.FindStringSubmatch(bodyStr)
-
-	if len(matches) >= 3 {
-		// matches[1] = src, matches[2] = src2
-		src2 := matches[2]
-		// Jeśli src2 jest relatywny, budujemy pełny URL
-		if strings.HasPrefix(src2, "c/") {
-			return "https://stooq.pl/" + src2, nil
-		}
-		return src2, nil
-	}
-
-	// Alternatywnie szukamy samego src2 w kontekście aqi_mc
-	src2Pattern := `id=["']aqi_mc["'][^>]*>.*?src2=["']([^"']+)["']`
-	re2 := regexp.MustCompile(src2Pattern)
-	matches2 := re2.FindStringSubmatch(bodyStr)
-
-	if len(matches2) >= 2 {
-		src2 := matches2[1]
-		if strings.HasPrefix(src2, "c/") {
-			return "https://stooq.pl/" + src2, nil
-		}
-		return src2, nil
-	}
-
-	// Jeśli regex nie zadziałał, próbujemy parsować HTML
-	doc, err := html.Parse(strings.NewReader(bodyStr))
-	if err != nil {
-		return "", fmt.Errorf("błąd parsowania HTML: %v", err)
-	}
-
-	var findDiv func(*html.Node) *html.Node
-	findDiv = func(n *html.Node) *html.Node {
-		if n.Type == html.ElementNode && n.Data == "div" {
-			for _, attr := range n.Attr {
-				if attr.Key == "id" && attr.Val == "aqi_mc" {
-					return n
-				}
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			if found := findDiv(c); found != nil {
-				return found
-			}
-		}
-		return nil
-	}
-
-	aqiDiv := findDiv(doc)
-	if aqiDiv == nil {
-		return "", fmt.Errorf("nie znaleziono div'a o id='aqi_mc'")
-	}
-
-	// Szukamy obrazka z src2
-	var findImage func(*html.Node) string
-	findImage = func(n *html.Node) string {
-		if n.Type == html.ElementNode && n.Data == "img" {
-			var src, src2 string
-			for _, attr := range n.Attr {
-				if attr.Key == "src2" {
-					src2 = attr.Val
-				} else if attr.Key == "src" {
-					src = attr.Val
-				}
-			}
-			// Preferujemy src2, jeśli nie ma to src
-			if src2 != "" {
-				if strings.HasPrefix(src2, "c/") {
-					return "https://stooq.pl/" + src2
-				}
-				return src2
-			}
-			return src
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			if imgSrc := findImage(c); imgSrc != "" {
-				return imgSrc
-			}
-		}
-		return ""
-	}
-
-	imageSrc := findImage(aqiDiv)
-	if imageSrc == "" {
-		return "", fmt.Errorf("nie znaleziono obrazka w div'ie")
-	}
-
-	return imageSrc, nil
-}
 
 func main() {
 	token := os.Getenv("DISCORD_TOKEN")
@@ -216,6 +97,8 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	if content == "!zlotamysl" || content == "!zm" {
 		sendRandomQuote(s, m.ChannelID)
+	} else if strings.HasPrefix(content, "!gem") {
+		handleGemCommand(s, m)
 	} else if strings.HasPrefix(content, "!dodaj ") {
 		quote := strings.TrimPrefix(content, "!dodaj ")
 		config.Quotes = append(config.Quotes, quote)
@@ -239,20 +122,6 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		config.ChannelID = channelID
 		saveConfig()
 		s.ChannelMessageSend(m.ChannelID, "✅ Ustawiono kanał dla codziennych myśli!")
-	} else if content == "!gem" {
-		s.ChannelMessageSend(m.ChannelID, "🔍 **Szukam obrazka GEM...**")
-
-		imageSrc, err := scrapeGemImage()
-		if err != nil {
-			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Błąd: %v", err))
-			return
-		}
-
-		if strings.HasPrefix(imageSrc, "data:image") {
-			s.ChannelMessageSend(m.ChannelID, "💎 **GEM Chart (Base64)**\n\nObrazek został znaleziony w formie base64")
-		} else {
-			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("💎 **GEM Chart**\n\nŹródło obrazka: %s", imageSrc))
-		}
 	} else if content == "!pomoc" {
 		help := `**🌟 Złote Myśli Bot - Komendy:**
 
@@ -261,10 +130,105 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 !usun <numer> - Usuń złotą myśl (podaj numer z listy)
 !lista - Pokaż wszystkie złote myśli
 !kanal <ID> - Ustaw kanał dla codziennych myśli o 9:00
-!gem - Pobierz wykres GEM ze Stooq.pl
 !pomoc - Pokaż tę pomoc`
 		s.ChannelMessageSend(m.ChannelID, help)
 	}
+}
+
+func handleGemCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	urlStr := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(m.Content), "!gem"))
+	if urlStr == "" {
+		urlStr = "https://stooq.pl/q/?s=eimi.uk&d=20260105&c=1y&t=l&a=lg&r=cndx.uk+cbu0.uk+ib01.uk"
+	}
+
+	pngBytes, err := scrapeStooqChartPNG(urlStr)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, "❌ Nie udało się pobrać wykresu: "+err.Error())
+		return
+	}
+
+	_, err = s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
+		Files: []*discordgo.File{
+			{Name: "gem.png", ContentType: "image/png", Reader: bytes.NewReader(pngBytes)},
+		},
+	})
+	if err != nil {
+		log.Println("Błąd wysyłania pliku na Discord:", err)
+	}
+}
+
+func scrapeStooqChartPNG(pageURL string) ([]byte, error) {
+	baseURL, err := url.Parse(pageURL)
+	if err != nil {
+		return nil, fmt.Errorf("nieprawidłowy URL: %w", err)
+	}
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, baseURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	img := doc.Find("div#aqi_mc img").First()
+	if img.Length() == 0 {
+		return nil, errors.New("nie znaleziono obrazka (div#aqi_mc img)")
+	}
+
+	src, ok := img.Attr("src")
+	if !ok || strings.TrimSpace(src) == "" {
+		return nil, errors.New("obrazek nie ma atrybutu src")
+	}
+
+	const prefix = "data:image/png;base64,"
+	if strings.HasPrefix(src, prefix) {
+		raw := strings.TrimPrefix(src, prefix)
+		b, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			return nil, fmt.Errorf("błąd dekodowania base64: %w", err)
+		}
+		return b, nil
+	}
+
+	imgURL, err := baseURL.Parse(src)
+	if err != nil {
+		return nil, fmt.Errorf("nieprawidłowy URL obrazka: %w", err)
+	}
+
+	imgReq, err := http.NewRequest(http.MethodGet, imgURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	imgReq.Header.Set("User-Agent", "Mozilla/5.0")
+
+	imgResp, err := client.Do(imgReq)
+	if err != nil {
+		return nil, err
+	}
+	defer imgResp.Body.Close()
+	if imgResp.StatusCode < 200 || imgResp.StatusCode >= 300 {
+		return nil, fmt.Errorf("HTTP %d (obrazek)", imgResp.StatusCode)
+	}
+
+	data, err := io.ReadAll(imgResp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func sendRandomQuote(s *discordgo.Session, channelID string) {

@@ -131,10 +131,17 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 !pomoc - Pokaż tę pomoc`
 		s.ChannelMessageSend(m.ChannelID, help)
 	} else if content == "!gem" {
-		s.ChannelMessageSend(m.ChannelID, "⏳ Generuję wykres...")
+		statusMsg, statusErr := s.ChannelMessageSend(m.ChannelID, "⏳ Generuję wykres...")
 		if err := generateAndSendGem(s, m.ChannelID); err != nil {
 			log.Println("!gem error:", err)
+			if statusErr == nil && statusMsg != nil {
+				s.ChannelMessageDelete(m.ChannelID, statusMsg.ID)
+			}
 			s.ChannelMessageSend(m.ChannelID, "❌ Nie udało się wygenerować wykresu")
+			return
+		}
+		if statusErr == nil && statusMsg != nil {
+			s.ChannelMessageDelete(m.ChannelID, statusMsg.ID)
 		}
 	} else if content == "!gemsubscribe" {
 		added := addGemSubscriber(m.Author.ID)

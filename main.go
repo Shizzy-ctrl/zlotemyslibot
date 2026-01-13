@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -152,6 +154,13 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		} else {
 			s.ChannelMessageSend(m.ChannelID, "✅ Już jesteś zapisany. Ostatni dzień miesiąca o 10:00 wrzucę wykres i oznaczę zapisanych.")
 		}
+	} else if content == "!pogoda" {
+		msg := buildTomorrowWeatherMessage()
+		if msg == "" {
+			s.ChannelMessageSend(m.ChannelID, "❌ Nie udało się pobrać prognozy")
+			return
+		}
+		s.ChannelMessageSend(m.ChannelID, msg)
 	}
 }
 
@@ -254,6 +263,24 @@ func startCronScheduler(s *discordgo.Session) {
 		log.Fatal("Cron AddFunc błąd:", err)
 	}
 
+	_, err = c.AddFunc("0 19 * * *", func() {
+		if config.GemChannelID == "" || len(config.GemSubscribers) == 0 {
+			return
+		}
+		msg := buildTomorrowWeatherMessage()
+		if msg == "" {
+			return
+		}
+		mention := mentionGemSubscribers()
+		if mention != "" {
+			msg = mention + "\n" + msg
+		}
+		s.ChannelMessageSend(config.GemChannelID, msg)
+	})
+	if err != nil {
+		log.Fatal("Cron AddFunc błąd:", err)
+	}
+
 	fmt.Println("✅ Cron działa - 9:00 CET codziennie!")
 	c.Start()
 }
@@ -311,5 +338,103 @@ func sendPaginatedList(s *discordgo.Session, channelID string) {
 		}
 
 		time.Sleep(1000 * time.Millisecond)
+	}
+}
+
+type weatherResponse struct {
+	Daily struct {
+		Time             []string  `json:"time"`
+		TemperatureMax   []float64 `json:"temperature_2m_max"`
+		TemperatureMin   []float64 `json:"temperature_2m_min"`
+		WeatherCode      []int     `json:"weathercode"`
+	} `json:"daily"`
+}
+
+type forecast struct {
+	MinC float64
+	MaxC float64
+	Code int
+	Date string
+}
+
+func buildTomorrowWeatherMessage() string {
+	lesna, err := fetchTomorrowForecast(51.0156, 15.2634)
+	if err != nil {
+		log.Println("weather Lesna error:", err)
+		return ""
+	}
+	bielsko, err := fetchTomorrowForecast(49.8224, 19.0469)
+	if err != nil {
+		log.Println("weather Bielsko error:", err)
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("🌤️ **Pogoda na jutro**\n")
+	b.WriteString(fmt.Sprintf("Leśna: %s, %.0f/%.0f°C\n", weatherDescription(lesna.Code), lesna.MinC, lesna.MaxC))
+	b.WriteString(fmt.Sprintf("Bielsko-Biała: %s, %.0f/%.0f°C", weatherDescription(bielsko.Code), bielsko.MinC, bielsko.MaxC))
+	return b.String()
+}
+
+func fetchTomorrowForecast(lat, lon float64) (forecast, error) {
+	url := fmt.Sprintf("https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=Europe/Warsaw&forecast_days=2", lat, lon)
+	resp, err := http.Get(url)
+	if err != nil {
+		return forecast{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return forecast{}, fmt.Errorf("bad status: %s", resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return forecast{}, err
+	}
+	var parsed weatherResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return forecast{}, err
+	}
+	if len(parsed.Daily.Time) < 2 || len(parsed.Daily.TemperatureMax) < 2 || len(parsed.Daily.TemperatureMin) < 2 || len(parsed.Daily.WeatherCode) < 2 {
+		return forecast{}, fmt.Errorf("insufficient forecast data")
+	}
+
+	return forecast{
+		Date: parsed.Daily.Time[1],
+		MaxC: parsed.Daily.TemperatureMax[1],
+		MinC: parsed.Daily.TemperatureMin[1],
+		Code: parsed.Daily.WeatherCode[1],
+	}, nil
+}
+
+func weatherDescription(code int) string {
+	switch code {
+	case 0:
+		return "bezchmurnie"
+	case 1, 2, 3:
+		return "częściowe zachmurzenie"
+	case 45, 48:
+		return "mgła"
+	case 51, 53, 55:
+		return "mżawka"
+	case 56, 57:
+		return "marznąca mżawka"
+	case 61, 63, 65:
+		return "deszcz"
+	case 66, 67:
+		return "marznący deszcz"
+	case 71, 73, 75:
+		return "śnieg"
+	case 77:
+		return "ziarna śniegu"
+	case 80, 81, 82:
+		return "przelotne opady"
+	case 85, 86:
+		return "przelotne opady śniegu"
+	case 95:
+		return "burza"
+	case 96, 99:
+		return "burza z gradem"
+	default:
+		return "pogoda"
 	}
 }

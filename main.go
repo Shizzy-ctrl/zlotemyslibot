@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,10 +18,10 @@ import (
 )
 
 type Config struct {
-	Quotes         []string `json:"quotes"`
-	ChannelID      string   `json:"channel_id"`
 	GemChannelID   string   `json:"gem_channel_id"`
 	GemSubscribers []string `json:"gem_subscribers"`
+	TestChannelID  string   `json:"test_channel_id"`
+	TestSubscriber string   `json:"test_subscriber"`
 }
 
 var (
@@ -36,8 +35,6 @@ func main() {
 		log.Fatal("Brak tokena Discord! Ustaw zmienną DISCORD_TOKEN")
 	}
 
-	rand.Seed(time.Now().UnixNano()) // ✅ Losowe cytaty
-
 	loadConfig()
 
 	dg, err := discordgo.New("Bot " + token)
@@ -50,6 +47,7 @@ func main() {
 
 	// 🚀 CRON SCHEDULER zamiast tickera
 	go startCronScheduler(dg)
+	go startTestScheduler(dg)
 
 	err = dg.Open()
 	if err != nil {
@@ -57,7 +55,7 @@ func main() {
 	}
 	defer dg.Close()
 
-	fmt.Println("Bot działa! Codzienne cytaty o 9:00 CET. Naciśnij CTRL+C aby zakończyć.")
+	fmt.Println("Bot działa! Naciśnij CTRL+C aby zakończyć.")
 
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
@@ -68,14 +66,10 @@ func loadConfig() {
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		config = Config{
-			Quotes: []string{
-				"Wytrwałość to klucz do sukcesu.",
-				"Każdy dzień to nowa szansa.",
-				"Wierz w siebie i swoje możliwości.",
-			},
-			ChannelID:      "",
 			GemChannelID:   "",
 			GemSubscribers: nil,
+			TestChannelID:  "",
+			TestSubscriber: "",
 		}
 		saveConfig()
 		return
@@ -95,43 +89,17 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	content := strings.TrimSpace(m.Content)
 
-	if content == "!zlotamysl" || content == "!zm" {
-		sendRandomQuote(s, m.ChannelID)
-	} else if strings.HasPrefix(content, "!dodaj ") {
-		quote := strings.TrimPrefix(content, "!dodaj ")
-		config.Quotes = append(config.Quotes, quote)
-		saveConfig()
-		s.ChannelMessageSend(m.ChannelID, "✅ Dodano nową złotą myśl!")
-	} else if strings.HasPrefix(content, "!usun ") {
-		numStr := strings.TrimPrefix(content, "!usun ")
-		var num int
-		fmt.Sscanf(numStr, "%d", &num)
-		if num > 0 && num <= len(config.Quotes) {
-			config.Quotes = append(config.Quotes[:num-1], config.Quotes[num:]...)
-			saveConfig()
-			s.ChannelMessageSend(m.ChannelID, "✅ Usunięto złotą myśl!")
-		} else {
-			s.ChannelMessageSend(m.ChannelID, "❌ Nieprawidłowy numer!")
-		}
-	} else if content == "!lista" {
-		sendPaginatedList(s, m.ChannelID)
-	} else if strings.HasPrefix(content, "!kanal ") {
-		channelID := strings.TrimPrefix(content, "!kanal ")
-		config.ChannelID = channelID
-		saveConfig()
-		s.ChannelMessageSend(m.ChannelID, "✅ Ustawiono kanał dla codziennych myśli!")
-	} else if content == "!pomoc" {
-		help := `**🌟 Złote Myśli Bot - Komendy:**
+	if content == "!pomoc" {
+		help := `**🤖 Bot - Komendy:**
 
-!zlotamysl lub !zm - Wyświetl losową złotą myśl
-!dodaj <tekst> - Dodaj nową złotą myśl
-!usun <numer> - Usuń złotą myśl (podaj numer z listy)
-!lista - Pokaż wszystkie złote myśli
-!kanal <ID> - Ustaw kanał dla codziennych myśli o 9:00
+!test - Uruchom testy repeaterów WiFi i pokaż podsumowanie
 !gem - Wygeneruj wykres ETF jako PNG
 !gemsubscribe - Zapisz się na miesięczny wykres ETF (ostatni dzień miesiąca, 10:00)
+!pogoda - Pogoda na jutro
 !pomoc - Pokaż tę pomoc`
 		s.ChannelMessageSend(m.ChannelID, help)
+	} else if content == "!test" {
+		runTestsAndSendSummary(s, m.ChannelID)
 	} else if content == "!gem" {
 		statusMsg, statusErr := s.ChannelMessageSend(m.ChannelID, "⏳ Generuję wykres...")
 		if err := generateAndSendGem(s, m.ChannelID); err != nil {
@@ -215,15 +183,6 @@ func generateAndSendGem(s *discordgo.Session, channelID string) error {
 	return err
 }
 
-func sendRandomQuote(s *discordgo.Session, channelID string) {
-	if len(config.Quotes) == 0 {
-		s.ChannelMessageSend(channelID, "Brak złotych myśli! Dodaj je komendą !dodaj")
-		return
-	}
-	quote := config.Quotes[rand.Intn(len(config.Quotes))]
-	s.ChannelMessageSend(channelID, fmt.Sprintf("✨ **Złota Myśl:** ✨\n\n*%s*", quote))
-}
-
 func startCronScheduler(s *discordgo.Session) {
 	loc, err := time.LoadLocation("Europe/Warsaw")
 	if err != nil {
@@ -231,17 +190,6 @@ func startCronScheduler(s *discordgo.Session) {
 	}
 
 	c := cron.New(cron.WithLocation(loc))
-
-	_, err = c.AddFunc("0 9 * * ?", func() {
-		fmt.Println("🕐 CRON 9:00 CET!")
-		if config.ChannelID != "" {
-			// ZMIENIONO: "Złota myśl dnia" zamiast zwykłej złotej myśli
-			sendDailyQuote(s, config.ChannelID)
-		}
-	})
-	if err != nil {
-		log.Fatal("Cron AddFunc błąd:", err)
-	}
 
 	_, err = c.AddFunc("0 10 * * *", func() {
 		now := time.Now().In(loc)
@@ -281,72 +229,16 @@ func startCronScheduler(s *discordgo.Session) {
 		log.Fatal("Cron AddFunc błąd:", err)
 	}
 
-	fmt.Println("✅ Cron działa - 9:00 CET codziennie!")
+	fmt.Println("✅ Cron działa!")
 	c.Start()
-}
-
-// NOWA FUNKCJA dla zaplanowanej złotej myśli dnia
-func sendDailyQuote(s *discordgo.Session, channelID string) {
-	if len(config.Quotes) == 0 {
-		s.ChannelMessageSend(channelID, "Brak złotych myśli! Dodaj je komendą !dodaj")
-		return
-	}
-	quote := config.Quotes[rand.Intn(len(config.Quotes))]
-	s.ChannelMessageSend(channelID, fmt.Sprintf("🌅 **Złota myśl dnia** 🌅\n\n*%s*", quote))
-}
-
-func sendPaginatedList(s *discordgo.Session, channelID string) {
-	if len(config.Quotes) == 0 {
-		s.ChannelMessageSend(channelID, "Brak złotych myśli!")
-		return
-	}
-
-	const maxChars = 1800
-	const maxQuotesPerPage = 12
-
-	for i := 0; i < len(config.Quotes); i += maxQuotesPerPage {
-		end := i + maxQuotesPerPage
-		if end > len(config.Quotes) {
-			end = len(config.Quotes)
-		}
-
-		var msg strings.Builder
-		msg.WriteString(fmt.Sprintf("**📜 Złote Myśli (%d-%d/%d):**\n\n", i+1, end, len(config.Quotes)))
-
-		pageChars := 50
-		for j := i; j < end; j++ {
-			quoteNum := fmt.Sprintf("%d. ", j+1)
-			quotePreview := config.Quotes[j]
-
-			if len(quotePreview) > 100 {
-				quotePreview = quotePreview[:97] + "..."
-			}
-
-			line := quoteNum + quotePreview + "\n"
-			if pageChars+len(line) > maxChars {
-				break
-			}
-
-			msg.WriteString(line)
-			pageChars += len(line)
-		}
-
-		// POPRAWIONE: _ dla message, err dla błędu
-		if _, err := s.ChannelMessageSend(channelID, msg.String()); err != nil {
-			log.Println("Błąd wysyłania listy:", err)
-			return
-		}
-
-		time.Sleep(1000 * time.Millisecond)
-	}
 }
 
 type weatherResponse struct {
 	Daily struct {
-		Time             []string  `json:"time"`
-		TemperatureMax   []float64 `json:"temperature_2m_max"`
-		TemperatureMin   []float64 `json:"temperature_2m_min"`
-		WeatherCode      []int     `json:"weathercode"`
+		Time           []string  `json:"time"`
+		TemperatureMax []float64 `json:"temperature_2m_max"`
+		TemperatureMin []float64 `json:"temperature_2m_min"`
+		WeatherCode    []int     `json:"weathercode"`
 	} `json:"daily"`
 }
 

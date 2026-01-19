@@ -1,7 +1,8 @@
 {
-  "quotes": [
-    "test2",
-    "test1"
+  "gem_channel_id": "1454871017943208162",
+  "gem_subscribers": [
+    "1454871017943208162"
   ],
-  "channel_id": "bot"
+  "test_channel_id": "1454871017943208162",
+  "test_subscriber": "1454871017943208162"
 }
